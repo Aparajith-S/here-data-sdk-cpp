@@ -80,6 +80,12 @@ VersionedLayerClient::PrefetchTiles(PrefetchTilesRequest request,
   return impl_->PrefetchTiles(std::move(request), std::move(status_callback));
 }
 
+client::CancellationToken VersionedLayerClient::PrefetchPartitions(
+    PartitionsRequest request, PrefetchPartitionsResponseCallback callback,
+    PrefetchStatusCallback status_callback) {
+  return impl_->PrefetchPartitions(std::move(request), std::move(callback),
+                                   std::move(status_callback));
+}
 client::CancellationToken VersionedLayerClient::GetData(
     TileRequest request, DataResponseCallback callback) {
   return impl_->GetData(std::move(request), std::move(callback));

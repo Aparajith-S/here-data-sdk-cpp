@@ -81,6 +81,10 @@ class VersionedLayerClientImpl {
   virtual client::CancellableFuture<PrefetchTilesResponse> PrefetchTiles(
       PrefetchTilesRequest request, PrefetchStatusCallback status_callback);
 
+  virtual client::CancellationToken PrefetchPartitions(
+      PartitionsRequest request, PrefetchPartitionsResponseCallback callback,
+      PrefetchStatusCallback status_callback);
+
   virtual bool RemoveFromCache(const std::string& partition_id);
 
   virtual bool RemoveFromCache(const geo::TileKey& tile);

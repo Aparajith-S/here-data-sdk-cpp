@@ -346,6 +346,9 @@ class DATASERVICE_READ_API VersionedLayerClient final {
       PrefetchTilesRequest request,
       PrefetchStatusCallback status_callback = nullptr);
 
+  client::CancellationToken PrefetchPartitions(
+      PartitionsRequest request, PrefetchPartitionsResponseCallback callback,
+      PrefetchStatusCallback status_callback = nullptr);
   /**
    * @brief Removes the partition from the mutable disk cache.
    *

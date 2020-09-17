@@ -20,6 +20,7 @@
 #include "VersionedLayerClientImpl.h"
 
 #include <algorithm>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -185,6 +186,146 @@ client::CancellableFuture<DataResponse> VersionedLayerClientImpl::GetData(
       });
   return client::CancellableFuture<DataResponse>(std::move(cancel_token),
                                                  std::move(promise));
+}
+
+client::CancellationToken VersionedLayerClientImpl::PrefetchPartitions(
+    PartitionsRequest request, PrefetchPartitionsResponseCallback callback,
+    PrefetchStatusCallback status_callback) {
+  class DATASERVICE_READ_API PrefetchPartitionNoError {
+   public:
+    PrefetchPartitionNoError() = default;
+    PrefetchPartitionNoError(const PrefetchPartitionNoError& other) = default;
+    ~PrefetchPartitionNoError() = default;
+  };
+
+  using EmptyResponse = Response<PrefetchPartitionNoError>;
+  using client::CancellationContext;
+  using client::ErrorCode;
+  auto catalog = catalog_;
+  auto layer_id = layer_id_;
+  auto settings = settings_;
+  auto pending_requests = pending_requests_;
+  auto lookup_client = lookup_client_;
+
+  auto token = AddTask(
+      settings.task_scheduler, pending_requests,
+      [=](CancellationContext context) mutable -> EmptyResponse {
+        if (request.GetPartitionIds().empty()) {
+          OLP_SDK_LOG_WARNING_F(
+              kLogTag, "PrefetchPartitions : invalid request, layer=%s",
+              layer_id.c_str());
+          return {{ErrorCode::InvalidArgument, "Empty partitions list"}};
+        }
+
+        auto response =
+            GetVersion(request.GetBillingTag(), OnlineIfNotFound, context);
+
+        if (!response.IsSuccessful()) {
+          OLP_SDK_LOG_WARNING_F(
+              kLogTag,
+              "PrefetchPartitions: getting catalog version failed, key=%s",
+              request.CreateKey(layer_id).c_str());
+          return response.GetError();
+        }
+        auto version = response.GetResult().GetVersion();
+
+        const auto key = request.CreateKey(layer_id);
+        OLP_SDK_LOG_INFO_F(kLogTag, "PrefetchPartitions: using key=%s",
+                           key.c_str());
+
+        // shared_settings for saving some mb while prefetch.
+        auto shared_settings =
+            std::make_shared<client::OlpClientSettings>(settings);
+
+        auto billing_tag = request.GetBillingTag();
+        using PartitionDataHandleResult = std::map<std::string, std::string>;
+        using PartitionDataHandleResponse =
+            ExtendedApiResponse<PartitionDataHandleResult, client::ApiError,
+                                client::NetworkStatistics>;
+        repository::PartitionsRepository repository(catalog, *shared_settings,
+                                                    lookup_client);
+
+        auto query = [=](std::vector<std::string> root,
+                         client::CancellationContext inner_context) mutable {
+          auto res = repository.GetVersionedPartitions(
+              layer_id,
+              PartitionsRequest()
+                  .WithPartitionIds(std::move(root))
+                  .WithBillingTag(billing_tag),
+              version, context);
+          PartitionDataHandleResult result;
+          std::transform(std::begin(res.GetResult().GetPartitions()),
+                         std::end(res.GetResult().GetPartitions()),
+                         std::inserter(result, result.end()),
+                         [&](const model::Partition& partition) {
+                           return std::make_pair(partition.GetPartition(),
+                                                 partition.GetDataHandle());
+                         });
+          return PartitionDataHandleResponse(result);
+        };
+
+        auto download = [=](std::string data_handle,
+                            client::CancellationContext inner_context) mutable {
+          if (data_handle.empty()) {
+            return BlobApi::DataResponse(
+                client::ApiError(client::ErrorCode::NotFound, "Not found"));
+          }
+          repository::DataCacheRepository data_cache_repository(
+              catalog, shared_settings->cache);
+          if (data_cache_repository.IsCached(layer_id, data_handle)) {
+            return BlobApi::DataResponse(nullptr);
+          }
+
+          repository::DataRepository repository(catalog, *shared_settings,
+                                                lookup_client);
+          // Fetch from online
+          return repository.GetVersionedData(layer_id,
+                                             DataRequest()
+                                                 .WithDataHandle(data_handle)
+                                                 .WithBillingTag(billing_tag),
+                                             version, inner_context);
+        };
+
+        // split prefetch ids to blocks by 10 items
+        auto size_left = request.GetPartitionIds().size();
+        std::vector<std::vector<std::string>> roots;
+        size_t portion = 10u;
+        roots.reserve(size_left / portion + 1);
+        auto start = 0u;
+        while (size_left > start) {
+          auto size = std::min(portion, size_left - start);
+          roots.emplace_back(std::vector<std::string>(
+              request.GetPartitionIds().begin() + start,
+              request.GetPartitionIds().begin() + start + size));
+          start += size;
+        };
+
+        auto append_result = [](ExtendedDataResponse response, std::string item,
+                                PrefetchPartitionsResult& prefetch_result) {
+          if (response.IsSuccessful()) {
+            prefetch_result.AddPartition(std::move(item));
+          }
+        };
+
+        context.ExecuteOrCancelled([&]() {
+          return PrefetchHelper::Prefetch<std::string, std::vector<std::string>,
+                                          PrefetchPartitionsResult>(
+              std::move(roots), std::move(query), nullptr, std::move(download),
+              std::move(append_result), std::move(callback),
+              std::move(status_callback), settings.task_scheduler,
+              pending_requests);
+        });
+
+        return EmptyResponse(PrefetchPartitionNoError());
+      },
+      [callback](EmptyResponse response) {
+        // Inner task only generates successfull result
+        if (!response.IsSuccessful()) {
+          callback(response.GetError());
+        }
+      });
+
+  return token;
 }
 
 client::CancellationToken VersionedLayerClientImpl::PrefetchTiles(
