@@ -46,6 +46,7 @@ bool PendingUrlRequest::ExecuteOrCancelled(const ExecuteFuncType& func,
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Make sure we can only call context_ once
+  /*
   if (http_request_id_ != kInvalidRequestId) {
     OLP_SDK_LOG_WARNING_F(
         kLogTag,
@@ -53,6 +54,9 @@ bool PendingUrlRequest::ExecuteOrCancelled(const ExecuteFuncType& func,
         http_request_id_);
     return false;
   }
+  */
+
+  // We should be able to call this multiple times in case of an retry event
 
   return context_.ExecuteOrCancelled(
       [&]() -> client::CancellationToken { return func(http_request_id_); },
@@ -212,9 +216,6 @@ bool PendingUrlRequests::CancelAllAndWait() const {
 PendingUrlRequests::PendingUrlRequestPtr PendingUrlRequests::operator[](
     const std::string& url) {
   PendingUrlRequestPtr result_ptr = nullptr;
-
-  // TODO: Check here that the pending request was not cancelled before
-  // adding new callback to it?
 
   {
     std::lock_guard<std::mutex> lock(mutex_);

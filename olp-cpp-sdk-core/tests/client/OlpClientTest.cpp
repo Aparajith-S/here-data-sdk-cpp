@@ -36,8 +36,12 @@
 namespace {
 using olp::client::HttpResponse;
 using ::testing::_;
-
 namespace http = olp::http;
+
+static const auto kToManyRequestResponse =
+    http::NetworkResponse()
+        .WithStatus(http::HttpStatusCode::TOO_MANY_REQUESTS)
+        .WithError("Too many request, slow down!");
 
 class CallApiWrapper {
  public:
@@ -147,6 +151,7 @@ std::ostream& operator<<(std::ostream& os, const CallApiType call_type) {
 class OlpClientTest : public ::testing::TestWithParam<CallApiType> {
  protected:
   void SetUp() override {
+    network_ = std::make_shared<NetworkMock>();
     switch (GetParam()) {
       case CallApiType::ASYNC:
         call_wrapper_ = std::make_shared<CallApiAsync>(client_);
@@ -163,33 +168,46 @@ class OlpClientTest : public ::testing::TestWithParam<CallApiType> {
   olp::client::OlpClientSettings client_settings_;
   olp::client::OlpClient client_;
   std::shared_ptr<CallApiWrapper> call_wrapper_;
+  std::shared_ptr<NetworkMock> network_;
 };
 
 TEST_P(OlpClientTest, NumberOfAttempts) {
+  auto network = network_;
   client_settings_.retry_settings.max_attempts = 5;
   client_settings_.retry_settings.retry_condition =
-      ([](const olp::client::HttpResponse&) { return true; });
-  auto network = std::make_shared<NetworkMock>();
+      [](const olp::client::HttpResponse&) { return true; };
   client_settings_.network_request_handler = network;
+
+  std::vector<std::future<void>> futures;
+  olp::http::RequestId request_id = 5;
+
   EXPECT_CALL(*network, Send(_, _, _, _, _))
       .Times(6)
       .WillRepeatedly(
           [&](olp::http::NetworkRequest /*request*/,
-              olp::http::Network::Payload /*payload*/,
+              olp::http::Network::Payload payload,
               olp::http::Network::Callback callback,
               olp::http::Network::HeaderCallback /*header_callback*/,
               olp::http::Network::DataCallback /*data_callback*/) {
-            callback(olp::http::NetworkResponse().WithStatus(
-                http::HttpStatusCode::TOO_MANY_REQUESTS));
-            return olp::http::SendOutcome(olp::http::RequestId(5));
+            futures.emplace_back(std::async(std::launch::async, [=]() {
+              std::this_thread::sleep_for(std::chrono::milliseconds(50));
+              payload->seekp(0, std::ios_base::end);
+              payload->write(kToManyRequestResponse.GetError().c_str(),
+                             kToManyRequestResponse.GetError().size());
+              payload->seekp(0);
+              callback(kToManyRequestResponse);
+            }));
+            return olp::http::SendOutcome(request_id++);
           });
 
   client_.SetSettings(client_settings_);
 
-  auto response = call_wrapper_->CallApi(
-      std::string(), "GET", std::multimap<std::string, std::string>(),
-      std::multimap<std::string, std::string>(),
-      std::multimap<std::string, std::string>(), nullptr, std::string());
+  auto response =
+      call_wrapper_->CallApi(std::string(), "GET", {}, {}, {}, nullptr, {});
+
+  for (auto& future : futures) {
+    future.wait();
+  }
 
   ASSERT_EQ(http::HttpStatusCode::TOO_MANY_REQUESTS, response.status);
 }
@@ -1252,41 +1270,39 @@ TEST_P(OlpClientTest, SlowDownError) {
 }
 
 TEST_P(OlpClientTest, ApiKey) {
-    std::string url;
+  std::string url;
 
-    auto authenticaion_settings = olp::client::AuthenticationSettings();
-    authenticaion_settings.api_key_provider = []() {
-        return std::string( "test-key" );
-    };
-    // Set OAuth2 provider to be sure that api key provider
-    // has more priority
-    authenticaion_settings.provider = []() {
-        return std::string( "secret" );
-    };
+  auto authenticaion_settings = olp::client::AuthenticationSettings();
+  authenticaion_settings.api_key_provider = []() {
+    return std::string("test-key");
+  };
+  // Set OAuth2 provider to be sure that api key provider
+  // has more priority
+  authenticaion_settings.provider = []() { return std::string("secret"); };
 
-    auto network = std::make_shared<NetworkMock>();
-    client_settings_.network_request_handler = network;
-    client_settings_.authentication_settings = authenticaion_settings;
+  auto network = std::make_shared<NetworkMock>();
+  client_settings_.network_request_handler = network;
+  client_settings_.authentication_settings = authenticaion_settings;
 
-    EXPECT_CALL(*network, Send(_, _, _, _, _))
-        .WillOnce([&](olp::http::NetworkRequest request,
-                       olp::http::Network::Payload /*payload*/,
-                       olp::http::Network::Callback callback,
-                       olp::http::Network::HeaderCallback /*header_callback*/,
-                       olp::http::Network::DataCallback /*data_callback*/) {
-                           url = request.GetUrl();
-                           callback(
-                               olp::http::NetworkResponse().WithStatus(http::HttpStatusCode::OK));
-                           return olp::http::SendOutcome(olp::http::RequestId(5));
-                   });
-    client_.SetSettings(client_settings_);
+  EXPECT_CALL(*network, Send(_, _, _, _, _))
+      .WillOnce([&](olp::http::NetworkRequest request,
+                    olp::http::Network::Payload /*payload*/,
+                    olp::http::Network::Callback callback,
+                    olp::http::Network::HeaderCallback /*header_callback*/,
+                    olp::http::Network::DataCallback /*data_callback*/) {
+        url = request.GetUrl();
+        callback(
+            olp::http::NetworkResponse().WithStatus(http::HttpStatusCode::OK));
+        return olp::http::SendOutcome(olp::http::RequestId(5));
+      });
+  client_.SetSettings(client_settings_);
 
-    auto response = call_wrapper_->CallApi(
-        "here.com", "GET", std::multimap<std::string, std::string>(),
-        std::multimap<std::string, std::string>(),
-        std::multimap<std::string, std::string>(), nullptr, std::string());
+  auto response = call_wrapper_->CallApi(
+      "here.com", "GET", std::multimap<std::string, std::string>(),
+      std::multimap<std::string, std::string>(),
+      std::multimap<std::string, std::string>(), nullptr, std::string());
 
-    ASSERT_EQ(url, "here.com?apiKey=test-key");
+  ASSERT_EQ(url, "here.com?apiKey=test-key");
 }
 
 INSTANTIATE_TEST_SUITE_P(, OlpClientTest,

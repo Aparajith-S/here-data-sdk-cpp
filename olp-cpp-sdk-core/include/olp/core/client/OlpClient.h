@@ -42,6 +42,7 @@ class CORE_API OlpClient {
   using RequestBodyType = std::shared_ptr<std::vector<std::uint8_t>>;
 
   OlpClient();
+  explicit OlpClient(const OlpClientSettings& settings, std::string base_url);
   virtual ~OlpClient();
 
   // Movable and copyable
@@ -67,12 +68,18 @@ class CORE_API OlpClient {
   /**
    * @brief Gets the default headers that are added to each request.
    *
+   * @note Do not change this while requests are ongoing.
+   *
    * @return The default headers.
    */
   ParametersType& GetMutableDefaultHeaders();
 
   /**
    * @brief Sets the client settings.
+   *
+   * @note Handle with care and do not change while requests are ongoing.
+   * Ideally the settings would not change during the lifecycle of this
+   * instance.
    *
    * @param settings The client settings.
    */
